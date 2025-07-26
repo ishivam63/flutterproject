@@ -13,7 +13,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:image_picker/image_picker.dart';
 
 final googleSignIn = new GoogleSignIn();
-final analytics = new FirebaseAnalytics();
+final analytics = FirebaseAnalytics.instance;
 final auth = FirebaseAuth.instance;
 var currentUserEmail;
 var _scaffoldContext;
@@ -29,7 +29,7 @@ class ChatScreenState extends State<ChatScreen> {
   final TextEditingController _textEditingController =
       new TextEditingController();
   bool _isComposingMessage = false;
-  final reference = FirebaseDatabase.instance.reference().child('messages');
+  final reference = FirebaseDatabase.instance.ref().child('messages');
 
   @override
   Widget build(BuildContext context) {
@@ -51,10 +51,17 @@ class ChatScreenState extends State<ChatScreen> {
                   query: reference,
                   padding: const EdgeInsets.all(8.0),
                   reverse: true,
-                  sort: (a, b) => b.key.compareTo(a.key),
+                  sort: (a, b) {
+                    final aKey = a.key;
+                    final bKey = b.key;
+                    if (aKey == null && bKey == null) return 0;
+                    if (aKey == null) return 1;
+                    if (bKey == null) return -1;
+                    return bKey.compareTo(aKey);
+                  },
                   //comparing timestamp of messages to check which one would appear first
-                  itemBuilder: (_, DataSnapshot messageSnapshot,
-                      Animation<double> animation) {
+                  itemBuilder: (BuildContext context, DataSnapshot messageSnapshot,
+                      Animation<double> animation, int index) {
                     return new ChatMessageListItem(
                       messageSnapshot: messageSnapshot,
                       animation: animation,
@@ -78,7 +85,7 @@ class ChatScreenState extends State<ChatScreen> {
               ? new BoxDecoration(
                   border: new Border(
                       top: new BorderSide(
-                  color: Colors.grey[200],
+                  color: Colors.grey[200] ?? Colors.grey,
                 )))
               : null,
         ));
@@ -106,7 +113,7 @@ class ChatScreenState extends State<ChatScreen> {
     return new IconTheme(
         data: new IconThemeData(
           color: _isComposingMessage
-              ? Theme.of(context).accentColor
+              ? Theme.of(context).colorScheme.secondary
               : Theme.of(context).disabledColor,
         ),
         child: new Container(
@@ -118,21 +125,24 @@ class ChatScreenState extends State<ChatScreen> {
                 child: new IconButton(
                     icon: new Icon(
                       Icons.photo_camera,
-                      color: Theme.of(context).accentColor,
+                      color: Theme.of(context).colorScheme.secondary,
                     ),
                     onPressed: () async {
                       await _ensureLoggedIn();
-                      File imageFile = await ImagePicker.pickImage();
-                      int timestamp = new DateTime.now().millisecondsSinceEpoch;
-                      StorageReference storageReference = FirebaseStorage
-                          .instance
-                          .ref()
-                          .child("img_" + timestamp.toString() + ".jpg");
-                      StorageUploadTask uploadTask =
-                          storageReference.put(imageFile);
-                      Uri downloadUrl = (await uploadTask.future).downloadUrl;
-                      _sendMessage(
-                          messageText: null, imageUrl: downloadUrl.toString());
+                      final ImagePicker picker = ImagePicker();
+                      final XFile? pickedFile = await picker.pickImage(source: ImageSource.camera);
+                      if (pickedFile != null) {
+                        File imageFile = File(pickedFile.path);
+                        int timestamp = DateTime.now().millisecondsSinceEpoch;
+                        final storageRef = FirebaseStorage.instance
+                            .ref()
+                            .child("img_$timestamp.jpg");
+                        final uploadTask = storageRef.putFile(imageFile);
+                        final TaskSnapshot snapshot = await uploadTask;
+                        final String downloadUrl = await snapshot.ref.getDownloadURL();
+                        _sendMessage(
+                            messageText: '', imageUrl: downloadUrl);
+                      }
                     }),
               ),
               new Flexible(
@@ -159,7 +169,7 @@ class ChatScreenState extends State<ChatScreen> {
         ));
   }
 
-  Future<Null> _textMessageSubmitted(String text) async {
+  Future<void> _textMessageSubmitted(String text) async {
     _textEditingController.clear();
 
     setState(() {
@@ -167,45 +177,44 @@ class ChatScreenState extends State<ChatScreen> {
     });
 
     await _ensureLoggedIn();
-    _sendMessage(messageText: text, imageUrl: null);
+    _sendMessage(messageText: text, imageUrl: '');
   }
 
-  void _sendMessage({String messageText, String imageUrl}) {
+  void _sendMessage({required String messageText, required String imageUrl}) {
     reference.push().set({
       'text': messageText,
-      'email': googleSignIn.currentUser.email,
+      'email': googleSignIn.currentUser?.email ?? '',
       'imageUrl': imageUrl,
-      'senderName': googleSignIn.currentUser.displayName,
-      'senderPhotoUrl': googleSignIn.currentUser.photoUrl,
+      'senderName': googleSignIn.currentUser?.displayName ?? '',
+      'senderPhotoUrl': googleSignIn.currentUser?.photoUrl ?? '',
     });
 
     analytics.logEvent(name: 'send_message');
   }
 
-  Future<Null> _ensureLoggedIn() async {
-    GoogleSignInAccount signedInUser = googleSignIn.currentUser;
-    if (signedInUser == null)
-      signedInUser = await googleSignIn.signInSilently();
-    if (signedInUser == null) {
+  Future<void> _ensureLoggedIn() async {
+    if (googleSignIn.currentUser == null) {
       await googleSignIn.signIn();
-      analytics.logLogin();
     }
 
-    currentUserEmail = googleSignIn.currentUser.email;
+    currentUserEmail = googleSignIn.currentUser?.email ?? '';
 
-    if (await auth.currentUser() == null) {
-      GoogleSignInAuthentication credentials =
-          await googleSignIn.currentUser.authentication;
-      await auth.signInWithGoogle(
+    final user = auth.currentUser;
+    if (user == null) {
+      final GoogleSignInAuthentication? credentials =
+          await googleSignIn.currentUser?.authentication;
+      if (credentials != null) {
+        final AuthCredential authCredential = GoogleAuthProvider.credential(
           idToken: credentials.idToken, accessToken: credentials.accessToken);
+        await auth.signInWithCredential(authCredential);
+      }
     }
   }
 
-  Future _signOut() async {
+  Future<void> _signOut() async {
     await auth.signOut();
-    googleSignIn.signOut();
-    Scaffold
-        .of(_scaffoldContext)
-        .showSnackBar(new SnackBar(content: new Text('User logged out')));
+    await googleSignIn.signOut();
+    ScaffoldMessenger.of(_scaffoldContext)
+        .showSnackBar(SnackBar(content: Text('User logged out')));
   }
 }
